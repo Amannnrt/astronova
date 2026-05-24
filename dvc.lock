@@ -1,0 +1,46 @@
+schema: '2.0'
+stages:
+  preprocess:
+    cmd: python -c "from src.data.preprocessor import DataPreprocessor; 
+      DataPreprocessor('data/raw', 'data/processed').split_and_copy()"
+    deps:
+    - path: data/raw
+      hash: md5
+      md5: 26a23bc0109df4b9153403b97cfe68ca.dir
+      size: 18273247
+      nfiles: 400
+    - path: src/data/preprocessor.py
+      hash: md5
+      md5: 3d489d19098f68d89a57ad6b592aa8a5
+      size: 4893
+    outs:
+    - path: data/processed
+      hash: md5
+      md5: 79c8be06e33edf8a11490e6762c730b7.dir
+      size: 18273247
+      nfiles: 400
+  train:
+    cmd: python -m src.training.train
+    deps:
+    - path: data/processed
+      hash: md5
+      md5: 79c8be06e33edf8a11490e6762c730b7.dir
+      size: 18273247
+      nfiles: 400
+    - path: src/models/resnet_classifier.py
+      hash: md5
+      md5: fa2fd982f5197dc06716dc0028c1a50a
+      size: 1986
+    - path: src/training/train.py
+      hash: md5
+      md5: ed6ac904c7ab5e318c11e3326acb7451
+      size: 8239
+    outs:
+    - path: metrics.json
+      hash: md5
+      md5: 65939e54f37b3dd931341f0c47fce783
+      size: 2188
+    - path: models/best_model.pt
+      hash: md5
+      md5: 5b8cede57795b5c75ea22ded0c8dd68c
+      size: 98564632

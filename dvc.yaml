@@ -1,0 +1,20 @@
+stages:
+  preprocess:
+    cmd: python -c "from src.data.preprocessor import DataPreprocessor; DataPreprocessor('data/raw', 'data/processed').split_and_copy()"
+    deps:
+      - data/raw
+      - src/data/preprocessor.py
+    outs:
+      - data/processed
+
+  train:
+    cmd: python -m src.training.train
+    deps:
+      - data/processed
+      - src/models/resnet_classifier.py
+      - src/training/train.py
+    outs:
+      - models/best_model.pt
+    metrics:
+      - metrics.json:
+          cache: false
