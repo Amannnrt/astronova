@@ -1,0 +1,16 @@
+image_size: 224
+batch_size: 32
+train_split: 0.70
+val_split: 0.15
+test_split: 0.15
+num_workers: 2
+
+classes:
+  - galaxy
+  - nebula
+  - planet
+  - star_cluster
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]

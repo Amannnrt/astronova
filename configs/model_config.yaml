@@ -1,0 +1,7 @@
+architecture: resnet50
+pretrained: true
+pretrained_weights: IMAGENET1K_V1
+num_classes: 7
+dropout: 0.3
+freeze_until: layer3
+hidden_size: 512

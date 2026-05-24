@@ -1,10 +1,25 @@
+# Python
 venv/
 __pycache__/
 *.pyc
+*.pyo
+.eggs/
 
-.env
-
+# Data — tracked by DVC later
 data/raw/
 data/processed/
+data/metadata/
 
-.dvc/cache/
+# Models
+models/
+
+# MLflow
+mlflow.db
+mlruns/
+
+# Environment
+.env
+
+# Misc
+.DS_Store
+metrics.json
