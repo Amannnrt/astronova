@@ -110,7 +110,7 @@ class DataPreprocessor:
             for path, label in zip(ps, ls):
                 dest = self.processed_dir / split / CLASS_NAMES[label]
                 dest.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dest / Path(path).name)
+                shutil.copyfile(path, dest / Path(path).name)
 
         logger.info(f"Train {len(tr_paths)} | Val {len(va_paths)} | Test {len(te_paths)}")
 

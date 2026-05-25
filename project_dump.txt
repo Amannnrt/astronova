@@ -1,0 +1,3233 @@
+PROJECT DUMP: Astronova
+====================================================================================================
+
+
+====================================================================================================
+FILE: .env.example
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: README.md
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: airflow/.astro/config.yaml
+====================================================================================================
+
+project:
+    name: airflow
+
+
+
+====================================================================================================
+FILE: airflow/.astro/dag_integrity_exceptions.txt
+====================================================================================================
+
+# Add dag files to exempt from parse test below. ex: dags/<test-file>
+
+
+====================================================================================================
+FILE: airflow/.astro/test_dag_integrity_default.py
+====================================================================================================
+
+"""Test the validity of all DAGs. **USED BY DEV PARSE COMMAND DO NOT EDIT**"""
+
+from contextlib import contextmanager
+import logging
+import os
+
+import pytest
+
+from airflow.models import DagBag, Variable, Connection
+from airflow.hooks.base import BaseHook
+from airflow.utils.db import initdb
+
+# init airflow database
+initdb()
+
+# The following code patches errors caused by missing OS Variables, Airflow Connections, and Airflow Variables
+
+
+# =========== MONKEYPATCH BaseHook.get_connection() ===========
+def basehook_get_connection_monkeypatch(key: str, *args, **kwargs):
+    print(
+        f"Attempted to fetch connection during parse returning an empty Connection object for {key}"
+    )
+    return Connection(key)
+
+
+BaseHook.get_connection = basehook_get_connection_monkeypatch
+# # =========== /MONKEYPATCH BASEHOOK.GET_CONNECTION() ===========
+
+
+# =========== MONKEYPATCH OS.GETENV() ===========
+def os_getenv_monkeypatch(key: str, *args, **kwargs):
+    default = None
+    if args:
+        default = args[0]  # os.getenv should get at most 1 arg after the key
+    if kwargs:
+        default = kwargs.get(
+            "default", None
+        )  # and sometimes kwarg if people are using the sig
+
+    env_value = os.environ.get(key, None)
+
+    if env_value:
+        return env_value  # if the env_value is set, return it
+    if (
+        key == "JENKINS_HOME" and default is None
+    ):  # fix https://github.com/astronomer/astro-cli/issues/601
+        return None
+    if (
+        key == "PYTEST_THEME" and default is None
+    ):  # fix pytest validation of pygment styles
+        return None
+    if default:
+        return default  # otherwise return whatever default has been passed
+    return f"MOCKED_{key.upper()}_VALUE"  # if absolutely nothing has been passed - return the mocked value
+
+
+os.getenv = os_getenv_monkeypatch
+# # =========== /MONKEYPATCH OS.GETENV() ===========
+
+# =========== MONKEYPATCH VARIABLE.GET() ===========
+
+
+class magic_dict(dict):
+    def __init__(self, *args, **kwargs):
+        self.update(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return {}.get(key, "MOCKED_KEY_VALUE")
+
+
+_no_default = object()  # allow falsey defaults
+
+
+def variable_get_monkeypatch(key: str, default_var=_no_default, deserialize_json=False):
+    print(
+        f"Attempted to get Variable value during parse, returning a mocked value for {key}"
+    )
+
+    if default_var is not _no_default:
+        return default_var
+    if deserialize_json:
+        return magic_dict()
+    return "NON_DEFAULT_MOCKED_VARIABLE_VALUE"
+
+
+Variable.get = variable_get_monkeypatch
+
+# Also patch airflow.sdk.Variable for Airflow 3.x SDK imports
+# This ensures DAGs using 'from airflow.sdk import Variable' work with parse
+try:
+    from airflow import sdk as airflow_sdk
+
+    if hasattr(airflow_sdk, "Variable"):
+        airflow_sdk.Variable.get = variable_get_monkeypatch
+except ImportError:
+    pass  # airflow.sdk not available (older Airflow 3.x version)
+# # =========== /MONKEYPATCH VARIABLE.GET() ===========
+
+
+@contextmanager
+def suppress_logging(namespace):
+    """
+    Suppress logging within a specific namespace to keep tests "clean" during build
+    """
+    logger = logging.getLogger(namespace)
+    old_value = logger.disabled
+    logger.disabled = True
+    try:
+        yield
+    finally:
+        logger.disabled = old_value
+
+
+def get_import_errors():
+    """
+    Generate a tuple for import errors in the dag bag, and include DAGs without errors.
+    """
+    with suppress_logging("airflow"):
+        dag_bag = DagBag(include_examples=False)
+
+        def strip_path_prefix(path):
+            return os.path.relpath(path, os.environ.get("AIRFLOW_HOME"))
+
+        # Initialize an empty list to store the tuples
+        result = []
+
+        # Iterate over the items in import_errors
+        for k, v in dag_bag.import_errors.items():
+            result.append((strip_path_prefix(k), v.strip()))
+
+        # Check if there are DAGs without errors
+        for file_path in dag_bag.dags:
+            # Check if the file_path is not in import_errors, meaning no errors
+            if file_path not in dag_bag.import_errors:
+                result.append((strip_path_prefix(file_path), "No import errors"))
+
+        return result
+
+
+@pytest.mark.parametrize(
+    "rel_path, rv", get_import_errors(), ids=[x[0] for x in get_import_errors()]
+)
+def test_file_imports(rel_path, rv):
+    """Test for import errors on a file"""
+    if os.path.exists(".astro/dag_integrity_exceptions.txt"):
+        with open(".astro/dag_integrity_exceptions.txt", "r") as f:
+            exceptions = [line.strip() for line in f.readlines()]
+    print(f"Exceptions: {exceptions}")
+    if (rv != "No import errors") and rel_path not in exceptions:
+        # If rv is not "No import errors," consider it a failed test
+        raise Exception(f"{rel_path} failed to import with message \n {rv}")
+    else:
+        # If rv is "No import errors," consider it a passed test
+        print(f"{rel_path} passed the import test")
+
+
+
+====================================================================================================
+FILE: airflow/Dockerfile
+====================================================================================================
+
+FROM astrocrpublic.azurecr.io/runtime:3.2-4
+
+
+
+====================================================================================================
+FILE: airflow/README.md
+====================================================================================================
+
+Overview
+========
+
+Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+
+Project Contents
+================
+
+Your Astro project contains the following files and folders:
+
+- dags: This folder contains the Python files for your Airflow DAGs. By default, this directory includes one example DAG:
+    - `example_astronauts`: This DAG shows a simple ETL pipeline example that queries the list of astronauts currently in space from the Open Notify API and prints a statement for each astronaut. The DAG uses the TaskFlow API to define tasks in Python, and dynamic task mapping to dynamically print a statement for each astronaut. For more on how this DAG works, see our [Getting started tutorial](https://www.astronomer.io/docs/learn/get-started-with-airflow).
+- Dockerfile: This file contains a versioned Astro Runtime Docker image that provides a differentiated Airflow experience. If you want to execute other commands or overrides at runtime, specify them here.
+- include: This folder contains any additional files that you want to include as part of your project. It is empty by default.
+- packages.txt: Install OS-level packages needed for your project by adding them to this file. It is empty by default.
+- requirements.txt: Install Python packages needed for your project by adding them to this file. It is empty by default.
+- plugins: Add custom or community plugins for your project to this file. It is empty by default.
+- airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
+
+Deploy Your Project Locally
+===========================
+
+Start Airflow on your local machine by running 'astro dev start'.
+
+This command will spin up five Docker containers on your machine, each for a different Airflow component:
+
+- Postgres: Airflow's Metadata Database
+- Scheduler: The Airflow component responsible for monitoring and triggering tasks
+- DAG Processor: The Airflow component responsible for parsing DAGs
+- API Server: The Airflow component responsible for serving the Airflow UI and API
+- Triggerer: The Airflow component responsible for triggering deferred tasks
+
+When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
+
+Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
+
+Deploy Your Project to Astronomer
+=================================
+
+If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
+
+Contact
+=======
+
+The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+
+
+
+====================================================================================================
+FILE: airflow/airflow_settings.yaml
+====================================================================================================
+
+# This file allows you to configure Airflow Connections, Pools, and Variables in a single place for local development only.
+# NOTE: json dicts can be added to the conn_extra field as yaml key value pairs. See the example below.
+
+# For more information, refer to our docs: https://www.astronomer.io/docs/astro/cli/develop-project#configure-airflow_settingsyaml-local-development-only
+# For questions, reach out to: https://support.astronomer.io
+# For issues create an issue ticket here: https://github.com/astronomer/astro-cli/issues
+
+airflow:
+  connections:
+    - conn_id:
+      conn_type:
+      conn_host:
+      conn_schema:
+      conn_login:
+      conn_password:
+      conn_port:
+      conn_extra:
+        example_extra_field: example-value
+  pools:
+    - pool_name:
+      pool_slot:
+      pool_description:
+  variables:
+    - variable_name:
+      variable_value:
+
+
+
+====================================================================================================
+FILE: airflow/dags/exampledag.py
+====================================================================================================
+
+"""
+## Astronaut ETL example DAG
+
+This DAG queries the list of astronauts currently in space from the
+Open Notify API and prints each astronaut's name and flying craft.
+
+There are two tasks, one to get the data from the API and save the results,
+and another to print the results. Both tasks are written in Python using
+Airflow's TaskFlow API, which allows you to easily turn Python functions into
+Airflow tasks, and automatically infer dependencies and pass data.
+
+The second task uses dynamic task mapping to create a copy of the task for
+each Astronaut in the list retrieved from the API. This list will change
+depending on how many Astronauts are in space, and the DAG will adjust
+accordingly each time it runs.
+
+For more explanation and getting started instructions, see our Write your
+first DAG tutorial: https://www.astronomer.io/docs/learn/get-started-with-airflow
+
+![Picture of the ISS](https://www.esa.int/var/esa/storage/images/esa_multimedia/images/2010/02/space_station_over_earth/10293696-3-eng-GB/Space_Station_over_Earth_card_full.jpg)
+"""
+
+from airflow.sdk import Asset, dag, task
+from pendulum import datetime
+import requests
+
+
+# Define the basic parameters of the DAG, like schedule and start_date
+@dag(
+    start_date=datetime(2025, 4, 22),
+    schedule="@daily",
+    doc_md=__doc__,
+    default_args={"owner": "Astro", "retries": 3},
+    tags=["example"],
+)
+def example_astronauts():
+    # Define tasks
+    @task(
+        # Define an asset outlet for the task. This can be used to schedule downstream DAGs when this task has run.
+        outlets=[Asset("current_astronauts")]
+    )  # Define that this task updates the `current_astronauts` Asset
+    def get_astronauts(**context) -> list[dict]:
+        """
+        This task uses the requests library to retrieve a list of Astronauts
+        currently in space. The results are pushed to XCom with a specific key
+        so they can be used in a downstream pipeline. The task returns a list
+        of Astronauts to be used in the next task.
+        """
+        try:
+            r = requests.get("http://api.open-notify.org/astros.json")
+            r.raise_for_status()
+            number_of_people_in_space = r.json()["number"]
+            list_of_people_in_space = r.json()["people"]
+        except Exception:
+            print("API currently not available, using hardcoded data instead.")
+            number_of_people_in_space = 12
+            list_of_people_in_space = [
+                {"craft": "ISS", "name": "Oleg Kononenko"},
+                {"craft": "ISS", "name": "Nikolai Chub"},
+                {"craft": "ISS", "name": "Tracy Caldwell Dyson"},
+                {"craft": "ISS", "name": "Matthew Dominick"},
+                {"craft": "ISS", "name": "Michael Barratt"},
+                {"craft": "ISS", "name": "Jeanette Epps"},
+                {"craft": "ISS", "name": "Alexander Grebenkin"},
+                {"craft": "ISS", "name": "Butch Wilmore"},
+                {"craft": "ISS", "name": "Sunita Williams"},
+                {"craft": "Tiangong", "name": "Li Guangsu"},
+                {"craft": "Tiangong", "name": "Li Cong"},
+                {"craft": "Tiangong", "name": "Ye Guangfu"},
+            ]
+
+        context["ti"].xcom_push(
+            key="number_of_people_in_space", value=number_of_people_in_space
+        )
+        return list_of_people_in_space
+
+    @task
+    def print_astronaut_craft(greeting: str, person_in_space: dict) -> None:
+        """
+        This task creates a print statement with the name of an
+        Astronaut in space and the craft they are flying on from
+        the API request results of the previous task, along with a
+        greeting which is hard-coded in this example.
+        """
+        craft = person_in_space["craft"]
+        name = person_in_space["name"]
+
+        print(f"{name} is currently in space flying on the {craft}! {greeting}")
+
+    # Use dynamic task mapping to run the print_astronaut_craft task for each
+    # Astronaut in space
+    print_astronaut_craft.partial(greeting="Hello! :)").expand(
+        person_in_space=get_astronauts()  # Define dependencies using TaskFlow API syntax
+    )
+
+
+# Instantiate the DAG
+example_astronauts()
+
+
+
+====================================================================================================
+FILE: airflow/dags/fetch_apod_dag.py
+====================================================================================================
+
+"""
+DAG 1 — Daily APOD fetch
+Runs every day, fetches NASA APOD image, saves it to data/raw,
+logs it to image_log.csv
+"""
+import csv
+import io
+import logging
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import requests
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+PROJECT_ROOT = Path("/usr/local/astronova")
+sys.path.insert(0, PROJECT_ROOT)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_ARGS = {
+    "owner":            "astronova",
+    "retries":          2,
+    "retry_delay":      timedelta(minutes=5),
+    "email_on_failure": False,
+}
+
+#Tasks
+def fetch_and_save_apod(**kwargs):
+    context = kwargs
+    from dotenv import load_dotenv
+    load_dotenv(f"{PROJECT_ROOT}/.env")
+
+    from src.data.nasa_client     import NASAClient
+    from src.data.label_extractor import LabelExtractor
+
+    client    = NASAClient()
+    extractor = LabelExtractor()
+
+    # Try today and fall back up to 10 days
+    apod = None
+    for days_back in range(0, 10):
+        date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        apod = client.get_apod(date=date)
+        if apod:
+            break
+
+    if not apod:
+        logger.warning("No valid APOD image found in last 10 days")
+        return
+
+    url   = apod.get("url")
+    title = apod.get("title", "unknown")
+    date  = apod.get("date", datetime.now().strftime("%Y-%m-%d"))
+
+    logger.info(f"Fetched APOD: {title} ({date})")
+
+    # Extract label
+    label = extractor.from_apod(apod)
+    if not label:
+        logger.warning(f"Could not extract label for APOD: {title} — skipping")
+        return
+
+    # Download image
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    image_bytes = response.content
+
+    # Save to data/raw/<label>/
+    save_dir = Path(PROJECT_ROOT) / "data" / "raw" / label
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"apod_{date}.jpg"
+    filepath = save_dir / filename
+
+    if filepath.exists():
+        logger.info(f"Already downloaded: {filename}")
+        return
+
+    with open(filepath, "wb") as f:
+        f.write(image_bytes)
+
+    logger.info(f"Saved {label}/{filename}")
+
+    # Log to image_log.csv
+    metadata_path = Path(PROJECT_ROOT) / "data" / "metadata" / "image_log.csv"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(metadata_path, "a", newline="") as f:
+        csv.writer(f).writerow([
+            filename, label, "apod", date, datetime.now().isoformat()
+        ])
+
+    # Push to context for next task
+    context["ti"].xcom_push(key="new_image_label", value=label)
+    context["ti"].xcom_push(key="new_image_date",  value=date)
+
+
+def check_retrain_threshold(**kwargs):
+    context = kwargs
+    """Count images added since last retrain. Log count."""
+    metadata_path = Path(PROJECT_ROOT) / "data" / "metadata" / "image_log.csv"
+
+    if not metadata_path.exists():
+        logger.info("No metadata file found")
+        return
+
+    with open(metadata_path, "r") as f:
+        rows = list(csv.DictReader(f))
+
+    apod_images = [r for r in rows if r.get("source") == "apod"]
+    logger.info(f"Total APOD images collected so far: {len(apod_images)}")
+    context["ti"].xcom_push(key="apod_count", value=len(apod_images))
+
+
+#DAG 
+
+with DAG(
+    dag_id="fetch_apod_daily",
+    default_args=DEFAULT_ARGS,
+    description="Fetch NASA APOD image daily and save to dataset",
+    schedule="0 9 * * *",          # every day at 9am
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    tags=["astronova", "data"],
+) as dag:
+
+    fetch_task = PythonOperator(
+        task_id="fetch_and_save_apod",
+        python_callable=fetch_and_save_apod,
+    )
+
+    check_task = PythonOperator(
+        task_id="check_retrain_threshold",
+        python_callable=check_retrain_threshold,
+    )
+
+    fetch_task >> check_task
+
+
+
+====================================================================================================
+FILE: airflow/dags/retrain_dag.py
+====================================================================================================
+
+"""
+DAG 2 — Monthly retraining
+Runs on the 1st of every month.
+Triggers dvc repro which runs preprocess + train + logs to MLflow.
+"""
+import logging
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path 
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+PROJECT_ROOT = Path("/usr/local/astronova")
+
+sys.path.insert(0, PROJECT_ROOT)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_ARGS = {
+    "owner":            "astronova",
+    "retries":          1,
+    "retry_delay":      timedelta(minutes=10),
+    "email_on_failure": False,
+}
+
+
+#Tasks
+def update_data_version():
+    """Run dvc add and dvc push to version new APOD images."""
+    logger.info("Versioning new data with DVC...")
+
+    result = subprocess.run(
+        ["dvc", "add", "data/raw"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"dvc add failed: {result.stderr}")
+
+    result = subprocess.run(
+        ["dvc", "push"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"dvc push failed: {result.stderr}")
+
+    logger.info("Data versioned and pushed to DagsHub")
+
+
+def run_training_pipeline():
+    """Run dvc repro to trigger preprocess + train."""
+    logger.info("Starting retraining pipeline via dvc repro...")
+
+    result = subprocess.run(
+        ["dvc", "repro"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": PROJECT_ROOT},
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"dvc repro failed: {result.stderr}")
+
+    logger.info("Retraining pipeline completed successfully")
+
+
+def evaluate_new_model():
+    """Run evaluate.py and log results to MLflow."""
+    logger.info("Evaluating new model...")
+
+    result = subprocess.run(
+        ["python", "-m", "src.training.evaluate"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": PROJECT_ROOT},
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"Evaluation failed: {result.stderr}")
+
+    logger.info("Evaluation complete — results logged to MLflow")
+
+
+def compare_models():
+    """
+    Compare new model vs current best using MLflow.
+    Promotes new model if it beats current production model.
+    """
+    from dotenv import load_dotenv
+    load_dotenv(f"{PROJECT_ROOT}/.env")
+
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
+    client = MlflowClient()
+
+    model_name = "AstroNova-Classifier"
+
+    # Get all versions
+    versions = client.search_model_versions(f"name='{model_name}'")
+    if len(versions) < 2:
+        logger.info("Not enough model versions to compare — keeping current")
+        return
+
+    # Sort by version number, get latest two
+    versions_sorted = sorted(versions, key=lambda v: int(v.version), reverse=True)
+    new_version  = versions_sorted[0]
+    prod_version = versions_sorted[1]
+
+    # Get test accuracy from run metrics
+    def get_accuracy(run_id):
+        run = client.get_run(run_id)
+        return run.data.metrics.get("best_val_acc", 0.0)
+
+    new_acc  = get_accuracy(new_version.run_id)
+    prod_acc = get_accuracy(prod_version.run_id)
+
+    logger.info(f"New model accuracy:  {new_acc:.4f}")
+    logger.info(f"Prod model accuracy: {prod_acc:.4f}")
+
+    if new_acc > prod_acc:
+        client.set_model_version_tag(
+            model_name, new_version.version, "stage", "production"
+        )
+        client.set_model_version_tag(
+            model_name, prod_version.version, "stage", "archived"
+        )
+        logger.info(f"New model promoted to production (v{new_version.version})")
+    else:
+        logger.info("Current model retained — new model did not improve")
+
+
+#DAG
+with DAG(
+    dag_id="retrain_monthly",
+    default_args=DEFAULT_ARGS,
+    description="Monthly retraining pipeline — version data, retrain, evaluate, compare",
+    schedule="0 2 1 * *",         # 1st of every month at 2am
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    tags=["astronova", "training"],
+) as dag:
+
+    version_data = PythonOperator(
+        task_id="update_data_version",
+        python_callable=update_data_version,
+    )
+
+    retrain = PythonOperator(
+        task_id="run_training_pipeline",
+        python_callable=run_training_pipeline,
+    )
+
+    evaluate = PythonOperator(
+        task_id="evaluate_new_model",
+        python_callable=evaluate_new_model,
+    )
+
+    compare = PythonOperator(
+        task_id="compare_models",
+        python_callable=compare_models,
+    )
+
+    version_data >> retrain >> evaluate >> compare
+
+
+
+====================================================================================================
+FILE: airflow/docker-compose.override.yml
+====================================================================================================
+
+services:
+  scheduler:
+    volumes:
+      - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
+    environment:
+      - PYTHONPATH=/usr/local/astronova
+      - MLFLOW_TRACKING_URI=sqlite:////usr/local/astronova/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/usr/local/astronova/mlruns
+
+  triggerer:
+    volumes:
+      - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
+    environment:
+      - PYTHONPATH=/usr/local/astronova
+      - MLFLOW_TRACKING_URI=sqlite:////usr/local/astronova/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/usr/local/astronova/mlruns
+
+
+
+====================================================================================================
+FILE: airflow/packages.txt
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: airflow/requirements.txt
+====================================================================================================
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+Pillow
+python-dotenv
+mlflow
+dvc
+scikit-learn
+numpy
+
+
+
+====================================================================================================
+FILE: airflow/tests/dags/test_dag_example.py
+====================================================================================================
+
+"""Example DAGs test. This test ensures that all Dags have tags, retries set to two, and no import errors. This is an example pytest and may not be fit the context of your DAGs. Feel free to add and remove tests."""
+
+import os
+import logging
+from contextlib import contextmanager
+import pytest
+from airflow.models import DagBag
+
+
+@contextmanager
+def suppress_logging(namespace):
+    logger = logging.getLogger(namespace)
+    old_value = logger.disabled
+    logger.disabled = True
+    try:
+        yield
+    finally:
+        logger.disabled = old_value
+
+
+def get_import_errors():
+    """
+    Generate a tuple for import errors in the dag bag
+    """
+    with suppress_logging("airflow"):
+        dag_bag = DagBag(include_examples=False)
+
+        def strip_path_prefix(path):
+            return os.path.relpath(path, os.environ.get("AIRFLOW_HOME"))
+
+        # prepend "(None,None)" to ensure that a test object is always created even if it's a no op.
+        return [(None, None)] + [
+            (strip_path_prefix(k), v.strip()) for k, v in dag_bag.import_errors.items()
+        ]
+
+
+def get_dags():
+    """
+    Generate a tuple of dag_id, <DAG objects> in the DagBag
+    """
+    with suppress_logging("airflow"):
+        dag_bag = DagBag(include_examples=False)
+
+    def strip_path_prefix(path):
+        return os.path.relpath(path, os.environ.get("AIRFLOW_HOME"))
+
+    return [(k, v, strip_path_prefix(v.fileloc)) for k, v in dag_bag.dags.items()]
+
+
+@pytest.mark.parametrize(
+    "rel_path,rv", get_import_errors(), ids=[x[0] for x in get_import_errors()]
+)
+def test_file_imports(rel_path, rv):
+    """Test for import errors on a file"""
+    if rel_path and rv:
+        raise Exception(f"{rel_path} failed to import with message \n {rv}")
+
+
+APPROVED_TAGS = {}
+
+
+@pytest.mark.parametrize(
+    "dag_id,dag,fileloc", get_dags(), ids=[x[2] for x in get_dags()]
+)
+def test_dag_tags(dag_id, dag, fileloc):
+    """
+    test if a DAG is tagged and if those TAGs are in the approved list
+    """
+    assert dag.tags, f"{dag_id} in {fileloc} has no tags"
+    if APPROVED_TAGS:
+        assert not set(dag.tags) - APPROVED_TAGS
+
+
+@pytest.mark.parametrize(
+    "dag_id,dag, fileloc", get_dags(), ids=[x[2] for x in get_dags()]
+)
+def test_dag_retries(dag_id, dag, fileloc):
+    """
+    test if a DAG has retries set
+    """
+    assert (
+        dag.default_args.get("retries", None) >= 2
+    ), f"{dag_id} in {fileloc} must have task retries >= 2."
+
+
+
+====================================================================================================
+FILE: classification_report.txt
+====================================================================================================
+
+              precision    recall  f1-score   support
+
+      galaxy       0.75      0.79      0.77        19
+      nebula       0.73      0.62      0.67        13
+      planet       0.94      0.89      0.92        19
+star_cluster       0.58      0.70      0.64        10
+
+    accuracy                           0.77        61
+   macro avg       0.75      0.75      0.75        61
+weighted avg       0.78      0.77      0.77        61
+
+
+
+====================================================================================================
+FILE: configs/data_config.yaml
+====================================================================================================
+
+image_size: 224
+batch_size: 32
+train_split: 0.70
+val_split: 0.15
+test_split: 0.15
+num_workers: 2
+
+classes:
+  - galaxy
+  - nebula
+  - planet
+  - star_cluster
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+
+
+====================================================================================================
+FILE: configs/model_config.yaml
+====================================================================================================
+
+architecture: resnet50
+pretrained: true
+pretrained_weights: IMAGENET1K_V1
+num_classes: 4
+dropout: 0.5
+freeze_until: layer3
+hidden_size: 512
+
+
+
+====================================================================================================
+FILE: configs/training_config.yaml
+====================================================================================================
+
+epochs: 20
+learning_rate: 0.0001
+weight_decay: 0.0001
+optimizer: adamw
+scheduler: cosine_annealing
+patience: 5
+model_save_dir: models/
+
+
+
+====================================================================================================
+FILE: docker/Dockerfile
+====================================================================================================
+
+# docker/Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install CPU-only torch first — avoids downloading 2GB of CUDA
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+COPY models/ ./models/
+COPY configs/ ./configs/
+COPY .env .env
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.serving.fastapi_app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+
+====================================================================================================
+FILE: docker/docker-compose.yml
+====================================================================================================
+
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    volumes:
+      - ../models:/app/models
+
+  gradio:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: python src/serving/gradio_app.py
+    ports:
+      - "7860:7860"
+    env_file:
+      - ../.env
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+
+
+
+====================================================================================================
+FILE: dummmy_run.py
+====================================================================================================
+
+from pathlib import Path
+
+OUTPUT_FILE = "project_dump.txt"
+
+INCLUDE_EXTENSIONS = {
+    ".py",
+    ".yml",
+    ".yaml",
+    ".json",
+    ".toml",
+    ".txt",
+    ".md",
+    ".dockerignore",
+    ".gitignore",
+    ".ini",
+    ".cfg",
+}
+
+INCLUDE_FILENAMES = {
+    "Dockerfile",
+    "docker-compose.yml",
+    "requirements.txt",
+    "Makefile",
+    ".env.example",
+}
+
+EXCLUDE_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    "node_modules",
+    "data",
+    "mlruns",
+    "artifacts",
+    "checkpoints",
+    "models",
+    "dist",
+    "build",
+}
+
+EXCLUDE_EXTENSIONS = {
+    ".pt",
+    ".pth",
+    ".ckpt",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".csv",
+    ".parquet",
+    ".db",
+    ".sqlite",
+}
+
+root = Path.cwd()
+
+with open(OUTPUT_FILE, "w", encoding="utf-8") as out:
+
+    out.write(f"PROJECT DUMP: {root.name}\n")
+    out.write("=" * 100 + "\n\n")
+
+    for path in sorted(root.rglob("*")):
+
+        # Skip directories
+        if path.is_dir():
+            continue
+
+        # Skip excluded directories
+        if any(part in EXCLUDE_DIRS for part in path.parts):
+            continue
+
+        # Skip excluded extensions
+        if path.suffix.lower() in EXCLUDE_EXTENSIONS:
+            continue
+
+        # Check inclusion
+        should_include = (
+            path.suffix.lower() in INCLUDE_EXTENSIONS
+            or path.name in INCLUDE_FILENAMES
+        )
+
+        if not should_include:
+            continue
+
+        relative_path = path.relative_to(root)
+
+        out.write("\n")
+        out.write("=" * 100 + "\n")
+        out.write(f"FILE: {relative_path}\n")
+        out.write("=" * 100 + "\n\n")
+
+        try:
+            content = path.read_text(encoding="utf-8")
+            out.write(content)
+        except Exception as e:
+            out.write(f"[Could not read file: {e}]")
+
+        out.write("\n\n")
+
+print(f"\nProject dump created: {OUTPUT_FILE}")
+
+
+
+====================================================================================================
+FILE: dvc.yaml
+====================================================================================================
+
+stages:
+  preprocess:
+    cmd: python -c "from src.data.preprocessor import DataPreprocessor; DataPreprocessor('data/raw', 'data/processed').split_and_copy()"
+    deps:
+      - data/raw
+      - src/data/preprocessor.py
+    outs:
+      - data/processed
+
+  train:
+    cmd: python -m src.training.train
+    deps:
+      - data/processed
+      - src/models/resnet_classifier.py
+      - src/training/train.py
+    outs:
+      - models/best_model.pt
+    metrics:
+      - metrics.json:
+          cache: false
+
+
+
+====================================================================================================
+FILE: params.yaml
+====================================================================================================
+
+train:
+  epochs: 20
+  batch_size: 16
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  patience: 5
+
+data:
+  image_size: 224
+  train_split: 0.70
+  val_split: 0.15
+
+
+
+====================================================================================================
+FILE: project_dump.txt
+====================================================================================================
+
+PROJECT DUMP: Astronova
+====================================================================================================
+
+
+====================================================================================================
+FILE: .env.example
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: README.md
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: airflow/.astro/config.yaml
+====================================================================================================
+
+project:
+    name: airflow
+
+
+
+====================================================================================================
+FILE: airflow/.astro/dag_integrity_exceptions.txt
+====================================================================================================
+
+# Add dag files to exempt from parse test below. ex: dags/<test-file>
+
+
+====================================================================================================
+FILE: airflow/.astro/test_dag_integrity_default.py
+====================================================================================================
+
+"""Test the validity of all DAGs. **USED BY DEV PARSE COMMAND DO NOT EDIT**"""
+
+from contextlib import contextmanager
+import logging
+import os
+
+import pytest
+
+from airflow.models import DagBag, Variable, Connection
+from airflow.hooks.base import BaseHook
+from airflow.utils.db import initdb
+
+# init airflow database
+initdb()
+
+# The following code patches errors caused by missing OS Variables, Airflow Connections, and Airflow Variables
+
+
+# =========== MONKEYPATCH BaseHook.get_connection() ===========
+def basehook_get_connection_monkeypatch(key: str, *args, **kwargs):
+    print(
+        f"Attempted to fetch connection during parse returning an empty Connection object for {key}"
+    )
+    return Connection(key)
+
+
+BaseHook.get_connection = basehook_get_connection_monkeypatch
+# # =========== /MONKEYPATCH BASEHOOK.GET_CONNECTION() ===========
+
+
+# =========== MONKEYPATCH OS.GETENV() ===========
+def os_getenv_monkeypatch(key: str, *args, **kwargs):
+    default = None
+    if args:
+        default = args[0]  # os.getenv should get at most 1 arg after the key
+    if kwargs:
+        default = kwargs.get(
+            "default", None
+        )  # and sometimes kwarg if people are using the sig
+
+    env_value = os.environ.get(key, None)
+
+    if env_value:
+        return env_value  # if the env_value is set, return it
+    if (
+        key == "JENKINS_HOME" and default is None
+    ):  # fix https://github.com/astronomer/astro-cli/issues/601
+        return None
+    if (
+        key == "PYTEST_THEME" and default is None
+    ):  # fix pytest validation of pygment styles
+        return None
+    if default:
+        return default  # otherwise return whatever default has been passed
+    return f"MOCKED_{key.upper()}_VALUE"  # if absolutely nothing has been passed - return the mocked value
+
+
+os.getenv = os_getenv_monkeypatch
+# # =========== /MONKEYPATCH OS.GETENV() ===========
+
+# =========== MONKEYPATCH VARIABLE.GET() ===========
+
+
+class magic_dict(dict):
+    def __init__(self, *args, **kwargs):
+        self.update(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return {}.get(key, "MOCKED_KEY_VALUE")
+
+
+_no_default = object()  # allow falsey defaults
+
+
+def variable_get_monkeypatch(key: str, default_var=_no_default, deserialize_json=False):
+    print(
+        f"Attempted to get Variable value during parse, returning a mocked value for {key}"
+    )
+
+    if default_var is not _no_default:
+        return default_var
+    if deserialize_json:
+        return magic_dict()
+    return "NON_DEFAULT_MOCKED_VARIABLE_VALUE"
+
+
+Variable.get = variable_get_monkeypatch
+
+# Also patch airflow.sdk.Variable for Airflow 3.x SDK imports
+# This ensures DAGs using 'from airflow.sdk import Variable' work with parse
+try:
+    from airflow import sdk as airflow_sdk
+
+    if hasattr(airflow_sdk, "Variable"):
+        airflow_sdk.Variable.get = variable_get_monkeypatch
+except ImportError:
+    pass  # airflow.sdk not available (older Airflow 3.x version)
+# # =========== /MONKEYPATCH VARIABLE.GET() ===========
+
+
+@contextmanager
+def suppress_logging(namespace):
+    """
+    Suppress logging within a specific namespace to keep tests "clean" during build
+    """
+    logger = logging.getLogger(namespace)
+    old_value = logger.disabled
+    logger.disabled = True
+    try:
+        yield
+    finally:
+        logger.disabled = old_value
+
+
+def get_import_errors():
+    """
+    Generate a tuple for import errors in the dag bag, and include DAGs without errors.
+    """
+    with suppress_logging("airflow"):
+        dag_bag = DagBag(include_examples=False)
+
+        def strip_path_prefix(path):
+            return os.path.relpath(path, os.environ.get("AIRFLOW_HOME"))
+
+        # Initialize an empty list to store the tuples
+        result = []
+
+        # Iterate over the items in import_errors
+        for k, v in dag_bag.import_errors.items():
+            result.append((strip_path_prefix(k), v.strip()))
+
+        # Check if there are DAGs without errors
+        for file_path in dag_bag.dags:
+            # Check if the file_path is not in import_errors, meaning no errors
+            if file_path not in dag_bag.import_errors:
+                result.append((strip_path_prefix(file_path), "No import errors"))
+
+        return result
+
+
+@pytest.mark.parametrize(
+    "rel_path, rv", get_import_errors(), ids=[x[0] for x in get_import_errors()]
+)
+def test_file_imports(rel_path, rv):
+    """Test for import errors on a file"""
+    if os.path.exists(".astro/dag_integrity_exceptions.txt"):
+        with open(".astro/dag_integrity_exceptions.txt", "r") as f:
+            exceptions = [line.strip() for line in f.readlines()]
+    print(f"Exceptions: {exceptions}")
+    if (rv != "No import errors") and rel_path not in exceptions:
+        # If rv is not "No import errors," consider it a failed test
+        raise Exception(f"{rel_path} failed to import with message \n {rv}")
+    else:
+        # If rv is "No import errors," consider it a passed test
+        print(f"{rel_path} passed the import test")
+
+
+
+====================================================================================================
+FILE: airflow/Dockerfile
+====================================================================================================
+
+FROM astrocrpublic.azurecr.io/runtime:3.2-4
+
+
+
+====================================================================================================
+FILE: airflow/README.md
+====================================================================================================
+
+Overview
+========
+
+Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+
+Project Contents
+================
+
+Your Astro project contains the following files and folders:
+
+- dags: This folder contains the Python files for your Airflow DAGs. By default, this directory includes one example DAG:
+    - `example_astronauts`: This DAG shows a simple ETL pipeline example that queries the list of astronauts currently in space from the Open Notify API and prints a statement for each astronaut. The DAG uses the TaskFlow API to define tasks in Python, and dynamic task mapping to dynamically print a statement for each astronaut. For more on how this DAG works, see our [Getting started tutorial](https://www.astronomer.io/docs/learn/get-started-with-airflow).
+- Dockerfile: This file contains a versioned Astro Runtime Docker image that provides a differentiated Airflow experience. If you want to execute other commands or overrides at runtime, specify them here.
+- include: This folder contains any additional files that you want to include as part of your project. It is empty by default.
+- packages.txt: Install OS-level packages needed for your project by adding them to this file. It is empty by default.
+- requirements.txt: Install Python packages needed for your project by adding them to this file. It is empty by default.
+- plugins: Add custom or community plugins for your project to this file. It is empty by default.
+- airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
+
+Deploy Your Project Locally
+===========================
+
+Start Airflow on your local machine by running 'astro dev start'.
+
+This command will spin up five Docker containers on your machine, each for a different Airflow component:
+
+- Postgres: Airflow's Metadata Database
+- Scheduler: The Airflow component responsible for monitoring and triggering tasks
+- DAG Processor: The Airflow component responsible for parsing DAGs
+- API Server: The Airflow component responsible for serving the Airflow UI and API
+- Triggerer: The Airflow component responsible for triggering deferred tasks
+
+When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
+
+Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
+
+Deploy Your Project to Astronomer
+=================================
+
+If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
+
+Contact
+=======
+
+The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+
+
+
+====================================================================================================
+FILE: airflow/airflow_settings.yaml
+====================================================================================================
+
+# This file allows you to configure Airflow Connections, Pools, and Variables in a single place for local development only.
+# NOTE: json dicts can be added to the conn_extra field as yaml key value pairs. See the example below.
+
+# For more information, refer to our docs: https://www.astronomer.io/docs/astro/cli/develop-project#configure-airflow_settingsyaml-local-development-only
+# For questions, reach out to: https://support.astronomer.io
+# For issues create an issue ticket here: https://github.com/astronomer/astro-cli/issues
+
+airflow:
+  connections:
+    - conn_id:
+      conn_type:
+      conn_host:
+      conn_schema:
+      conn_login:
+      conn_password:
+      conn_port:
+      conn_extra:
+        example_extra_field: example-value
+  pools:
+    - pool_name:
+      pool_slot:
+      pool_description:
+  variables:
+    - variable_name:
+      variable_value:
+
+
+
+====================================================================================================
+FILE: airflow/dags/exampledag.py
+====================================================================================================
+
+"""
+## Astronaut ETL example DAG
+
+This DAG queries the list of astronauts currently in space from the
+Open Notify API and prints each astronaut's name and flying craft.
+
+There are two tasks, one to get the data from the API and save the results,
+and another to print the results. Both tasks are written in Python using
+Airflow's TaskFlow API, which allows you to easily turn Python functions into
+Airflow tasks, and automatically infer dependencies and pass data.
+
+The second task uses dynamic task mapping to create a copy of the task for
+each Astronaut in the list retrieved from the API. This list will change
+depending on how many Astronauts are in space, and the DAG will adjust
+accordingly each time it runs.
+
+For more explanation and getting started instructions, see our Write your
+first DAG tutorial: https://www.astronomer.io/docs/learn/get-started-with-airflow
+
+![Picture of the ISS](https://www.esa.int/var/esa/storage/images/esa_multimedia/images/2010/02/space_station_over_earth/10293696-3-eng-GB/Space_Station_over_Earth_card_full.jpg)
+"""
+
+from airflow.sdk import Asset, dag, task
+from pendulum import datetime
+import requests
+
+
+# Define the basic parameters of the DAG, like schedule and start_date
+@dag(
+    start_date=datetime(2025, 4, 22),
+    schedule="@daily",
+    doc_md=__doc__,
+    default_args={"owner": "Astro", "retries": 3},
+    tags=["example"],
+)
+def example_astronauts():
+    # Define tasks
+    @task(
+        # Define an asset outlet for the task. This can be used to schedule downstream DAGs when this task has run.
+        outlets=[Asset("current_astronauts")]
+    )  # Define that this task updates the `current_astronauts` Asset
+    def get_astronauts(**context) -> list[dict]:
+        """
+        This task uses the requests library to retrieve a list of Astronauts
+        currently in space. The results are pushed to XCom with a specific key
+        so they can be used in a downstream pipeline. The task returns a list
+        of Astronauts to be used in the next task.
+        """
+        try:
+            r = requests.get("http://api.open-notify.org/astros.json")
+            r.raise_for_status()
+            number_of_people_in_space = r.json()["number"]
+            list_of_people_in_space = r.json()["people"]
+        except Exception:
+            print("API currently not available, using hardcoded data instead.")
+            number_of_people_in_space = 12
+            list_of_people_in_space = [
+                {"craft": "ISS", "name": "Oleg Kononenko"},
+                {"craft": "ISS", "name": "Nikolai Chub"},
+                {"craft": "ISS", "name": "Tracy Caldwell Dyson"},
+                {"craft": "ISS", "name": "Matthew Dominick"},
+                {"craft": "ISS", "name": "Michael Barratt"},
+                {"craft": "ISS", "name": "Jeanette Epps"},
+                {"craft": "ISS", "name": "Alexander Grebenkin"},
+                {"craft": "ISS", "name": "Butch Wilmore"},
+                {"craft": "ISS", "name": "Sunita Williams"},
+                {"craft": "Tiangong", "name": "Li Guangsu"},
+                {"craft": "Tiangong", "name": "Li Cong"},
+                {"craft": "Tiangong", "name": "Ye Guangfu"},
+            ]
+
+        context["ti"].xcom_push(
+            key="number_of_people_in_space", value=number_of_people_in_space
+        )
+        return list_of_people_in_space
+
+    @task
+    def print_astronaut_craft(greeting: str, person_in_space: dict) -> None:
+        """
+        This task creates a print statement with the name of an
+        Astronaut in space and the craft they are flying on from
+        the API request results of the previous task, along with a
+        greeting which is hard-coded in this example.
+        """
+        craft = person_in_space["craft"]
+        name = person_in_space["name"]
+
+        print(f"{name} is currently in space flying on the {craft}! {greeting}")
+
+    # Use dynamic task mapping to run the print_astronaut_craft task for each
+    # Astronaut in space
+    print_astronaut_craft.partial(greeting="Hello! :)").expand(
+        person_in_space=get_astronauts()  # Define dependencies using TaskFlow API syntax
+    )
+
+
+# Instantiate the DAG
+example_astronauts()
+
+
+
+====================================================================================================
+FILE: airflow/dags/fetch_apod_dag.py
+====================================================================================================
+
+"""
+DAG 1 — Daily APOD fetch
+Runs every day, fetches NASA APOD image, saves it to data/raw,
+logs it to image_log.csv
+"""
+import csv
+import io
+import logging
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import requests
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+PROJECT_ROOT = Path("/usr/local/astronova")
+sys.path.insert(0, PROJECT_ROOT)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_ARGS = {
+    "owner":            "astronova",
+    "retries":          2,
+    "retry_delay":      timedelta(minutes=5),
+    "email_on_failure": False,
+}
+
+#Tasks
+def fetch_and_save_apod(**kwargs):
+    context = kwargs
+    from dotenv import load_dotenv
+    load_dotenv(f"{PROJECT_ROOT}/.env")
+
+    from src.data.nasa_client     import NASAClient
+    from src.data.label_extractor import LabelExtractor
+
+    client    = NASAClient()
+    extractor = LabelExtractor()
+
+    # Try today and fall back up to 10 days
+    apod = None
+    for days_back in range(0, 10):
+        date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        apod = client.get_apod(date=date)
+        if apod:
+            break
+
+    if not apod:
+        logger.warning("No valid APOD image found in last 10 days")
+        return
+
+    url   = apod.get("url")
+    title = apod.get("title", "unknown")
+    date  = apod.get("date", datetime.now().strftime("%Y-%m-%d"))
+
+    logger.info(f"Fetched APOD: {title} ({date})")
+
+    # Extract label
+    label = extractor.from_apod(apod)
+    if not label:
+        logger.warning(f"Could not extract label for APOD: {title} — skipping")
+        return
+
+    # Download image
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    image_bytes = response.content
+
+    # Save to data/raw/<label>/
+    save_dir = Path(PROJECT_ROOT) / "data" / "raw" / label
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"apod_{date}.jpg"
+    filepath = save_dir / filename
+
+    if filepath.exists():
+        logger.info(f"Already downloaded: {filename}")
+        return
+
+    with open(filepath, "wb") as f:
+        f.write(image_bytes)
+
+    logger.info(f"Saved {label}/{filename}")
+
+    # Log to image_log.csv
+    metadata_path = Path(PROJECT_ROOT) / "data" / "metadata" / "image_log.csv"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(metadata_path, "a", newline="") as f:
+        csv.writer(f).writerow([
+            filename, label, "apod", date, datetime.now().isoformat()
+        ])
+
+    # Push to context for next task
+    context["ti"].xcom_push(key="new_image_label", value=label)
+    context["ti"].xcom_push(key="new_image_date",  value=date)
+
+
+def check_retrain_threshold(**kwargs):
+    context = kwargs
+    """Count images added since last retrain. Log count."""
+    metadata_path = Path(PROJECT_ROOT) / "data" / "metadata" / "image_log.csv"
+
+    if not metadata_path.exists():
+        logger.info("No metadata file found")
+        return
+
+    with open(metadata_path, "r") as f:
+        rows = list(csv.DictReader(f))
+
+    apod_images = [r for r in rows if r.get("source") == "apod"]
+    logger.info(f"Total APOD images collected so far: {len(apod_images)}")
+    context["ti"].xcom_push(key="apod_count", value=len(apod_images))
+
+
+#DAG 
+
+with DAG(
+    dag_id="fetch_apod_daily",
+    default_args=DEFAULT_ARGS,
+    description="Fetch NASA APOD image daily and save to dataset",
+    schedule="0 9 * * *",          # every day at 9am
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    tags=["astronova", "data"],
+) as dag:
+
+    fetch_task = PythonOperator(
+        task_id="fetch_and_save_apod",
+        python_callable=fetch_and_save_apod,
+    )
+
+    check_task = PythonOperator(
+        task_id="check_retrain_threshold",
+        python_callable=check_retrain_threshold,
+    )
+
+    fetch_task >> check_task
+
+
+
+====================================================================================================
+FILE: airflow/dags/retrain_dag.py
+====================================================================================================
+
+"""
+DAG 2 — Monthly retraining
+Runs on the 1st of every month.
+Triggers dvc repro which runs preprocess + train + logs to MLflow.
+"""
+import logging
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path 
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+PROJECT_ROOT = Path("/usr/local/astronova")
+
+sys.path.insert(0, PROJECT_ROOT)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_ARGS = {
+    "owner":            "astronova",
+    "retries":          1,
+    "retry_delay":      timedelta(minutes=10),
+    "email_on_failure": False,
+}
+
+
+#Tasks
+def update_data_version():
+    """Run dvc add and dvc push to version new APOD images."""
+    logger.info("Versioning new data with DVC...")
+
+    result = subprocess.run(
+        ["dvc", "add", "data/raw"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"dvc add failed: {result.stderr}")
+
+    result = subprocess.run(
+        ["dvc", "push"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"dvc push failed: {result.stderr}")
+
+    logger.info("Data versioned and pushed to DagsHub")
+
+
+def run_training_pipeline():
+    """Run dvc repro to trigger preprocess + train."""
+    logger.info("Starting retraining pipeline via dvc repro...")
+
+    result = subprocess.run(
+        ["dvc", "repro"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": PROJECT_ROOT},
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"dvc repro failed: {result.stderr}")
+
+    logger.info("Retraining pipeline completed successfully")
+
+
+def evaluate_new_model():
+    """Run evaluate.py and log results to MLflow."""
+    logger.info("Evaluating new model...")
+
+    result = subprocess.run(
+        ["python", "-m", "src.training.evaluate"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": PROJECT_ROOT},
+    )
+    logger.info(result.stdout)
+    if result.returncode != 0:
+        raise Exception(f"Evaluation failed: {result.stderr}")
+
+    logger.info("Evaluation complete — results logged to MLflow")
+
+
+def compare_models():
+    """
+    Compare new model vs current best using MLflow.
+    Promotes new model if it beats current production model.
+    """
+    from dotenv import load_dotenv
+    load_dotenv(f"{PROJECT_ROOT}/.env")
+
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"))
+    client = MlflowClient()
+
+    model_name = "AstroNova-Classifier"
+
+    # Get all versions
+    versions = client.search_model_versions(f"name='{model_name}'")
+    if len(versions) < 2:
+        logger.info("Not enough model versions to compare — keeping current")
+        return
+
+    # Sort by version number, get latest two
+    versions_sorted = sorted(versions, key=lambda v: int(v.version), reverse=True)
+    new_version  = versions_sorted[0]
+    prod_version = versions_sorted[1]
+
+    # Get test accuracy from run metrics
+    def get_accuracy(run_id):
+        run = client.get_run(run_id)
+        return run.data.metrics.get("best_val_acc", 0.0)
+
+    new_acc  = get_accuracy(new_version.run_id)
+    prod_acc = get_accuracy(prod_version.run_id)
+
+    logger.info(f"New model accuracy:  {new_acc:.4f}")
+    logger.info(f"Prod model accuracy: {prod_acc:.4f}")
+
+    if new_acc > prod_acc:
+        client.set_model_version_tag(
+            model_name, new_version.version, "stage", "production"
+        )
+        client.set_model_version_tag(
+            model_name, prod_version.version, "stage", "archived"
+        )
+        logger.info(f"New model promoted to production (v{new_version.version})")
+    else:
+        logger.info("Current model retained — new model did not improve")
+
+
+#DAG
+with DAG(
+    dag_id="retrain_monthly",
+    default_args=DEFAULT_ARGS,
+    description="Monthly retraining pipeline — version data, retrain, evaluate, compare",
+    schedule="0 2 1 * *",         # 1st of every month at 2am
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    tags=["astronova", "training"],
+) as dag:
+
+    version_data = PythonOperator(
+        task_id="update_data_version",
+        python_callable=update_data_version,
+    )
+
+    retrain = PythonOperator(
+        task_id="run_training_pipeline",
+        python_callable=run_training_pipeline,
+    )
+
+    evaluate = PythonOperator(
+        task_id="evaluate_new_model",
+        python_callable=evaluate_new_model,
+    )
+
+    compare = PythonOperator(
+        task_id="compare_models",
+        python_callable=compare_models,
+    )
+
+    version_data >> retrain >> evaluate >> compare
+
+
+
+====================================================================================================
+FILE: airflow/docker-compose.override.yml
+====================================================================================================
+
+services:
+  scheduler:
+    volumes:
+      - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
+    environment:
+      - PYTHONPATH=/usr/local/astronova
+      - MLFLOW_TRACKING_URI=sqlite:////usr/local/astronova/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/usr/local/astronova/mlruns
+
+  triggerer:
+    volumes:
+      - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
+    environment:
+      - PYTHONPATH=/usr/local/astronova
+      - MLFLOW_TRACKING_URI=sqlite:////usr/local/astronova/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/usr/local/astronova/mlruns
+
+
+
+====================================================================================================
+FILE: airflow/packages.txt
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: airflow/requirements.txt
+====================================================================================================
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+Pillow
+python-dotenv
+mlflow
+dvc
+scikit-learn
+numpy
+
+
+
+====================================================================================================
+FILE: airflow/tests/dags/test_dag_example.py
+====================================================================================================
+
+"""Example DAGs test. This test ensures that all Dags have tags, retries set to two, and no import errors. This is an example pytest and may not be fit the context of your DAGs. Feel free to add and remove tests."""
+
+import os
+import logging
+from contextlib import contextmanager
+import pytest
+from airflow.models import DagBag
+
+
+@contextmanager
+def suppress_logging(namespace):
+    logger = logging.getLogger(namespace)
+    old_value = logger.disabled
+    logger.disabled = True
+    try:
+        yield
+    finally:
+        logger.disabled = old_value
+
+
+def get_import_errors():
+    """
+    Generate a tuple for import errors in the dag bag
+    """
+    with suppress_logging("airflow"):
+        dag_bag = DagBag(include_examples=False)
+
+        def strip_path_prefix(path):
+            return os.path.relpath(path, os.environ.get("AIRFLOW_HOME"))
+
+        # prepend "(None,None)" to ensure that a test object is always created even if it's a no op.
+        return [(None, None)] + [
+            (strip_path_prefix(k), v.strip()) for k, v in dag_bag.import_errors.items()
+        ]
+
+
+def get_dags():
+    """
+    Generate a tuple of dag_id, <DAG objects> in the DagBag
+    """
+    with suppress_logging("airflow"):
+        dag_bag = DagBag(include_examples=False)
+
+    def strip_path_prefix(path):
+        return os.path.relpath(path, os.environ.get("AIRFLOW_HOME"))
+
+    return [(k, v, strip_path_prefix(v.fileloc)) for k, v in dag_bag.dags.items()]
+
+
+@pytest.mark.parametrize(
+    "rel_path,rv", get_import_errors(), ids=[x[0] for x in get_import_errors()]
+)
+def test_file_imports(rel_path, rv):
+    """Test for import errors on a file"""
+    if rel_path and rv:
+        raise Exception(f"{rel_path} failed to import with message \n {rv}")
+
+
+APPROVED_TAGS = {}
+
+
+@pytest.mark.parametrize(
+    "dag_id,dag,fileloc", get_dags(), ids=[x[2] for x in get_dags()]
+)
+def test_dag_tags(dag_id, dag, fileloc):
+    """
+    test if a DAG is tagged and if those TAGs are in the approved list
+    """
+    assert dag.tags, f"{dag_id} in {fileloc} has no tags"
+    if APPROVED_TAGS:
+        assert not set(dag.tags) - APPROVED_TAGS
+
+
+@pytest.mark.parametrize(
+    "dag_id,dag, fileloc", get_dags(), ids=[x[2] for x in get_dags()]
+)
+def test_dag_retries(dag_id, dag, fileloc):
+    """
+    test if a DAG has retries set
+    """
+    assert (
+        dag.default_args.get("retries", None) >= 2
+    ), f"{dag_id} in {fileloc} must have task retries >= 2."
+
+
+
+====================================================================================================
+FILE: classification_report.txt
+====================================================================================================
+
+              precision    recall  f1-score   support
+
+      galaxy       0.75      0.79      0.77        19
+      nebula       0.73      0.62      0.67        13
+      planet       0.94      0.89      0.92        19
+star_cluster       0.58      0.70      0.64        10
+
+    accuracy                           0.77        61
+   macro avg       0.75      0.75      0.75        61
+weighted avg       0.78      0.77      0.77        61
+
+
+
+====================================================================================================
+FILE: configs/data_config.yaml
+====================================================================================================
+
+image_size: 224
+batch_size: 32
+train_split: 0.70
+val_split: 0.15
+test_split: 0.15
+num_workers: 2
+
+classes:
+  - galaxy
+  - nebula
+  - planet
+  - star_cluster
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+
+
+====================================================================================================
+FILE: configs/model_config.yaml
+====================================================================================================
+
+architecture: resnet50
+pretrained: true
+pretrained_weights: IMAGENET1K_V1
+num_classes: 4
+dropout: 0.5
+freeze_until: layer3
+hidden_size: 512
+
+
+
+====================================================================================================
+FILE: configs/training_config.yaml
+====================================================================================================
+
+epochs: 20
+learning_rate: 0.0001
+weight_decay: 0.0001
+optimizer: adamw
+scheduler: cosine_annealing
+patience: 5
+model_save_dir: models/
+
+
+
+====================================================================================================
+FILE: docker/Dockerfile
+====================================================================================================
+
+# docker/Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install CPU-only torch first — avoids downloading 2GB of CUDA
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+COPY models/ ./models/
+COPY configs/ ./configs/
+COPY .env .env
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.serving.fastapi_app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+
+====================================================================================================
+FILE: docker/docker-compose.yml
+====================================================================================================
+
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    volumes:
+      - ../models:/app/models
+
+  gradio:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: python src/serving/gradio_app.py
+    ports:
+      - "7860:7860"
+    env_file:
+      - ../.env
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+
+
+
+====================================================================================================
+FILE: dummmy_run.py
+====================================================================================================
+
+from pathlib import Path
+
+OUTPUT_FILE = "project_dump.txt"
+
+INCLUDE_EXTENSIONS = {
+    ".py",
+    ".yml",
+    ".yaml",
+    ".json",
+    ".toml",
+    ".txt",
+    ".md",
+    ".dockerignore",
+    ".gitignore",
+    ".ini",
+    ".cfg",
+}
+
+INCLUDE_FILENAMES = {
+    "Dockerfile",
+    "docker-compose.yml",
+    "requirements.txt",
+    "Makefile",
+    ".env.example",
+}
+
+EXCLUDE_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    "node_modules",
+    "data",
+    "mlruns",
+    "artifacts",
+    "checkpoints",
+    "models",
+    "dist",
+    "build",
+}
+
+EXCLUDE_EXTENSIONS = {
+    ".pt",
+    ".pth",
+    ".ckpt",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".csv",
+    ".parquet",
+    ".db",
+    ".sqlite",
+}
+
+root = Path.cwd()
+
+with open(OUTPUT_FILE, "w", encoding="utf-8") as out:
+
+    out.write(f"PROJECT DUMP: {root.name}\n")
+    out.write("=" * 100 + "\n\n")
+
+    for path in sorted(root.rglob("*")):
+
+        # Skip directories
+        if path.is_dir():
+            continue
+
+        # Skip excluded directories
+        if any(part in EXCLUDE_DIRS for part in path.parts):
+            continue
+
+        # Skip excluded extensions
+        if path.suffix.lower() in EXCLUDE_EXTENSIONS:
+            continue
+
+        # Check inclusion
+        should_include = (
+            path.suffix.lower() in INCLUDE_EXTENSIONS
+            or path.name in INCLUDE_FILENAMES
+        )
+
+        if not should_include:
+            continue
+
+        relative_path = path.relative_to(root)
+
+        out.write("\n")
+        out.write("=" * 100 + "\n")
+        out.write(f"FILE: {relative_path}\n")
+        out.write("=" * 100 + "\n\n")
+
+        try:
+            content = path.read_text(encoding="utf-8")
+            out.write(content)
+        except Exception as e:
+            out.write(f"[Could not read file: {e}]")
+
+        out.write("\n\n")
+
+print(f"\nProject dump created: {OUTPUT_FILE}")
+
+
+
+====================================================================================================
+FILE: dvc.yaml
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: requirements-dev.txt
+====================================================================================================
+
+pytest
+flake8
+black
+isort
+
+
+
+====================================================================================================
+FILE: requirements.txt
+====================================================================================================
+
+torch==2.7.1
+torchvision==0.22.1
+pandas
+numpy
+pillow
+opencv-python
+scikit-learn
+matplotlib
+
+fastapi
+uvicorn
+gradio
+
+mlflow
+dvc
+
+python-dotenv
+pyyaml
+requests
+
+
+
+====================================================================================================
+FILE: scripts/seed_data.py
+====================================================================================================
+
+"""
+One-time script to download the initial training dataset from NASA Image Library.
+Run: python scripts/seed_data.py
+"""
+import logging
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.data.nasa_client    import NASAClient
+from src.data.label_extractor import LabelExtractor
+from src.data.downloader     import ImageDownloader
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Queries per target class
+# Multiple queries increase variety within a class
+IMAGES_PER_CLASS = 150      # adjust as needed
+
+"""
+QUERIES: dict[str, list[str]] = {
+    "galaxy":       ["hubble galaxy", "james webb galaxy", "hubble spiral galaxy"],
+    "nebula":       ["hubble nebula", "james webb nebula", "hubble planetary nebula"],
+    "planet":       ["saturn rings hubble", "jupiter hubble", "neptune hubble"],
+    "star_cluster": ["hubble globular cluster", "hubble star cluster","omega centauri hubble","hubble open cluster stars"],
+}
+"""
+
+QUERIES: dict[str, list[str]] = {
+    "galaxy":       ["hubble galaxy", "james webb galaxy", "hubble spiral galaxy"],  # already 150, leave it
+    "nebula":       ["hubble nebula", "james webb nebula", "hubble planetary nebula", 
+                     "crab nebula", "eagle nebula hubble", "orion nebula hubble"],    # add these
+    "planet":       ["saturn rings hubble", "jupiter hubble", "neptune hubble",
+                     "mars hubble", "hubble planet solar system"],                    # add these
+    "star_cluster": ["hubble globular cluster", "hubble star cluster",
+                     "omega centauri hubble", "hubble open cluster stars",
+                     "pleiades hubble", "47 tucanae hubble"],                         # add these
+}
+
+
+def main():
+    client = NASAClient()
+    extractor = LabelExtractor()
+    downloader = ImageDownloader(
+        raw_data_dir  = "data/raw",
+        metadata_path = "data/metadata/image_log.csv",
+    )
+
+    for target_class, queries in QUERIES.items():
+        saved = 0
+        logger.info(f"\n{'='*50}")
+        logger.info(f"Downloading class: {target_class}")
+
+        for query in queries:
+            if saved >= IMAGES_PER_CLASS:
+                break
+
+            items = client.search_all_pages(query, max_images=200)
+            logger.info(f"  Query '{query}' → {len(items)} items returned")
+
+            for item in items:
+                if saved >= IMAGES_PER_CLASS:
+                    break
+
+                nasa_id = client.get_nasa_id(item)
+                url= client.get_preview_url(item)
+
+                if not nasa_id or not url:
+                    continue
+
+                # Only save if the metadata confirms the image matches target class
+                extracted = extractor.from_library_item(item)
+                if extracted != target_class:
+                    continue
+
+                if downloader.save(url, target_class, nasa_id):
+                    saved += 1
+
+        logger.info(f"  Saved {saved} images for class '{target_class}'")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+====================================================================================================
+FILE: src/__init__.py
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: src/serving/__init__.py
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: src/serving/fastapi_app.py
+====================================================================================================
+
+"""
+FastAPI serving app.
+Run locally: uvicorn src.serving.fastapi_app:app --reload --port 8000
+"""
+import io
+import logging
+import time
+from collections import deque
+from contextlib import asynccontextmanager
+from typing import Optional
+
+import torch
+import torch.nn.functional as F
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+from torchvision import transforms
+
+from src.models.resnet_classifier import AstroClassifier
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ── Constants ────────────────────────────────────────────────────────
+CLASS_NAMES   = ["galaxy", "nebula", "planet", "star_cluster"]
+MODEL_PATH    = "models/best_model.pt"
+DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+EVAL_TRANSFORMS = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    ),
+])
+
+# App state 
+model= None
+prediction_count = 0
+confidence_window = deque(maxlen=100)   # rolling window for drift detection
+start_time       = time.time()
+
+
+#Lifespan
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global model
+    logger.info(f"Loading model from {MODEL_PATH} on {DEVICE}")
+    model = AstroClassifier.load(MODEL_PATH, device=str(DEVICE))
+    model.to(DEVICE)
+    model.eval()
+    logger.info("Model loaded successfully")
+    yield
+    logger.info("Shutting down")
+
+
+app = FastAPI(
+    title="AstroNova API",
+    description="NASA Astronomy Image Classifier",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def preprocess(image_bytes: bytes) -> torch.Tensor:
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return EVAL_TRANSFORMS(image).unsqueeze(0).to(DEVICE)
+
+
+@app.get("/health")
+def health():
+    uptime_seconds = int(time.time() - start_time)
+    hours, rem     = divmod(uptime_seconds, 3600)
+    minutes, secs  = divmod(rem, 60)
+    return {
+        "status":       "ok",
+        "model":        MODEL_PATH,
+        "device":       str(DEVICE),
+        "uptime":       f"{hours}h {minutes}m {secs}s",
+    }
+
+
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    global prediction_count
+
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(400, "File must be an image")
+
+    image_bytes = await file.read()
+
+    try:
+        tensor = preprocess(image_bytes)
+    except Exception as e:
+        raise HTTPException(400, f"Could not process image: {e}")
+
+    start = time.time()
+    with torch.no_grad():
+        logits = model(tensor)
+        probs  = F.softmax(logits, dim=1).squeeze()
+
+    inference_ms = round((time.time() - start) * 1000, 2)
+
+    confidence, pred_idx = probs.max(dim=0)
+    confidence           = float(confidence)
+    pred_class           = CLASS_NAMES[pred_idx.item()]
+
+    # Track for drift detection (Stage 7)
+    prediction_count += 1
+    confidence_window.append(confidence)
+
+    return {
+        "class":            pred_class,
+        "confidence":       round(confidence, 4),
+        "all_scores":       {
+            cls: round(float(probs[i]), 4)
+            for i, cls in enumerate(CLASS_NAMES)
+        },
+        "inference_time_ms": inference_ms,
+        "prediction_number": prediction_count,
+    }
+
+
+@app.get("/metrics")
+def metrics():
+    avg_conf = (
+        sum(confidence_window) / len(confidence_window)
+        if confidence_window else 0.0
+    )
+    return {
+        "total_predictions":  prediction_count,
+        "avg_confidence":     round(avg_conf, 4),
+        "drift_flag":         avg_conf < 0.75 and len(confidence_window) >= 10,
+        "window_size":        len(confidence_window),
+    }
+
+
+@app.get("/model-info")
+def model_info():
+    return {
+        "architecture":    "ResNet50",
+        "num_classes":     len(CLASS_NAMES),
+        "class_names":     CLASS_NAMES,
+        "model_path":      MODEL_PATH,
+        "test_accuracy":   0.7705,
+        "test_f1":         0.7722,
+        "avg_confidence":  0.8363,
+    }
+
+
+
+====================================================================================================
+FILE: src/serving/gradio_app.py
+====================================================================================================
+
+"""
+Gradio frontend demo.
+Run locally: python src/serving/gradio_app.py
+Make sure FastAPI is running on port 8000 first.
+"""
+import io
+import os
+from dotenv import load_dotenv
+import gradio as gr
+import requests
+from PIL import Image
+
+from src.data.nasa_client import NASAClient
+load_dotenv()
+
+API_URL = os.getenv("API_URL", "http://localhost:8000")
+
+
+def predict_image(image: Image.Image):
+    if image is None:
+        return {}, "No image provided."
+
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG")
+    buf.seek(0)
+
+    try:
+        response = requests.post(
+            f"{API_URL}/predict",
+            files={"file": ("image.jpg", buf, "image/jpeg")},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        pred_class = data["class"].replace("_", " ").title()
+        confidence = data["confidence"]
+        all_scores = data["all_scores"]
+        inf_time   = data["inference_time_ms"]
+
+        info = f"Predicted: {pred_class}  |  Confidence: {confidence:.1%}  |  Inference: {inf_time}ms"
+        return all_scores, info
+
+    except requests.exceptions.ConnectionError:
+        return {}, "Cannot connect to API. Make sure FastAPI is running on port 8000."
+    except Exception as e:
+        return {}, f"Error: {str(e)}"
+
+def fetch_apod():
+    try:
+        client = NASAClient()
+        # Try today first, fall back to a few previous dates
+        from datetime import datetime, timedelta
+        for days_back in range(0, 10):
+            date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+            apod = client.get_apod(date=date)
+            print(f"Trying {date}: {apod}")
+            if apod and apod.get("url"):
+                response = requests.get(apod["url"], timeout=30)
+                return Image.open(io.BytesIO(response.content)).convert("RGB")
+        print("No image found in last 10 days")
+    except Exception as e:
+        print(f"APOD fetch failed: {e}")
+    return None
+
+with gr.Blocks(
+    theme=gr.themes.Monochrome(),
+    title="AstroNova",
+    css=".gradio-container { max-width: 900px; margin: auto; }"
+) as demo:
+
+    gr.Markdown("## AstroNova — Astronomy Image Classifier")
+    gr.Markdown("Upload an astronomy image or pull today's NASA image to classify it.")
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            image_input = gr.Image(label="Input Image", type="pil", height=300)
+            with gr.Row():
+                fetch_btn   = gr.Button("Fetch NASA APOD", variant="secondary")
+                predict_btn = gr.Button("Classify", variant="primary")
+
+        with gr.Column(scale=1):
+            label_output = gr.Label(label="Class Scores", num_top_classes=4)
+            result_text  = gr.Textbox(label="Result", lines=2)
+
+    gr.Markdown(
+        "Classes: Galaxy | Nebula | Planet | Star Cluster  —  "
+        "ResNet50 | Test Accuracy: 77.05% | F1: 0.772"
+    )
+
+    predict_btn.click(predict_image, inputs=[image_input], outputs=[label_output, result_text])
+    fetch_btn.click(fetch_apod, inputs=[], outputs=[image_input])
+
+
+if __name__ == "__main__":
+    demo.launch(server_port=7860, share=False)
+
+
+
+====================================================================================================
+FILE: src/training/__init__.py
+====================================================================================================
+
+
+
+
+====================================================================================================
+FILE: src/training/evaluate.py
+====================================================================================================
+
+import logging
+import os
+
+import matplotlib.pyplot as plt
+import mlflow
+import mlflow.pytorch
+import numpy as np
+import seaborn as sns
+import torch
+from dotenv import load_dotenv
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    f1_score,
+)
+
+from src.data.preprocessor import DataPreprocessor
+from src.models.resnet_classifier import AstroClassifier
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
+
+CLASS_NAMES = [
+    "galaxy",
+    "nebula",
+    "planet",
+    "star_cluster",
+]
+
+
+@torch.no_grad()
+def evaluate(
+    model_path: str = "models/best_model.pt",
+    raw_data_dir: str = "data/raw",
+    processed_data_dir: str = "data/processed",
+    batch_size: int = 16,
+):
+
+
+    mlflow.set_tracking_uri(
+        os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+    )
+
+    mlflow.set_experiment("AstroNova-Classification")
+
+    model = AstroClassifier.load(
+        model_path,
+        device=str(DEVICE),
+    )
+
+    model.to(DEVICE)
+
+    model.eval()
+
+    logger.info(f"Loaded model from: {model_path}")
+
+    preprocessor = DataPreprocessor(
+        raw_data_dir,
+        processed_data_dir,
+    )
+
+    _, _, test_loader = (
+        preprocessor.get_dataloaders(batch_size)
+    )
+
+
+    all_preds = []
+    all_labels = []
+    all_confs = []
+
+    for imgs, labels in test_loader:
+
+        imgs = imgs.to(DEVICE)
+
+        logits = model(imgs)
+
+        probs = torch.softmax(logits, dim=1)
+
+        confs, preds = probs.max(dim=1)
+
+        all_preds.extend(preds.cpu().numpy())
+
+        all_labels.extend(labels.numpy())
+
+        all_confs.extend(confs.cpu().numpy())
+
+
+    acc = np.mean(
+        np.array(all_preds) == np.array(all_labels)
+    )
+
+    f1 = f1_score(
+        all_labels,
+        all_preds,
+        average="weighted",
+    )
+
+    avg_conf = float(np.mean(all_confs))
+
+    cm = confusion_matrix(
+        all_labels,
+        all_preds,
+    )
+
+    report = classification_report(
+        all_labels,
+        all_preds,
+        target_names=CLASS_NAMES,
+    )
+
+    logger.info(f"\n{report}")
+
+    logger.info(f"\nConfusion Matrix:\n{cm}")
+
+    logger.info(
+        f"\nAverage confidence: {avg_conf:.4f}"
+    )
+
+
+    plt.figure(figsize=(8, 6))
+
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=CLASS_NAMES,
+        yticklabels=CLASS_NAMES,
+    )
+
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title("Confusion Matrix")
+    cm_plot_path = "confusion_matrix.png"
+    plt.savefig(cm_plot_path)
+
+    plt.close()
+    plt.figure(figsize=(8, 5))
+    plt.hist(all_confs, bins=20)
+    plt.xlabel("Confidence")
+    plt.ylabel("Frequency")
+    plt.title("Prediction Confidence Distribution")
+    conf_plot_path = "confidence_distribution.png"
+    plt.savefig(conf_plot_path)
+    plt.close()
+
+
+    cm_csv_path = "confusion_matrix.csv"
+
+    np.savetxt(
+        cm_csv_path,
+        cm,
+        delimiter=",",
+        fmt="%d",
+    )
+
+    report_path = "classification_report.txt"
+
+    with open(report_path, "w") as f:
+        f.write(report)
+
+    with mlflow.start_run(run_name="evaluation"):
+
+
+        mlflow.log_metrics({
+            "test_accuracy": round(acc, 4),
+            "test_f1_weighted": round(f1, 4),
+            "avg_confidence": round(avg_conf, 4),
+        })
+
+        f1_per_class = f1_score(
+            all_labels,
+            all_preds,
+            average=None,
+        )
+
+        for cls_name, score in zip(
+            CLASS_NAMES,
+            f1_per_class,
+        ):
+
+            mlflow.log_metric(
+                f"f1_{cls_name}",
+                round(float(score), 4),
+            )
+
+        mlflow.log_artifact(cm_plot_path)
+        mlflow.log_artifact(conf_plot_path)
+        mlflow.log_artifact(cm_csv_path)
+        mlflow.log_artifact(report_path)
+        logger.info(f"\nTest Accuracy : {acc:.4f}")
+        logger.info(f"Weighted F1   : {f1:.4f}")
+        logger.info(
+            f"Avg Confidence: {avg_conf:.4f}"
+        )
+
+    return acc, f1, avg_conf
+
+
+if __name__ == "__main__":
+    evaluate()
+
+
+
+====================================================================================================
+FILE: src/training/train.py
+====================================================================================================
+
+"""
+Stage 2 training script — with MLflow tracking + artifacts.
+Run: python -m src.training.train
+"""
+
+import json
+import logging
+import os
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import mlflow
+import mlflow.pytorch
+import torch
+import torch.nn as nn
+from dotenv import load_dotenv
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+from src.data.preprocessor import DataPreprocessor
+from src.models.resnet_classifier import AstroClassifier
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _train_epoch(model, loader, criterion, optimizer, device):
+    model.train()
+
+    total_loss = 0
+    correct = 0
+    total = 0
+
+    for i, (imgs, labels) in enumerate(loader):
+
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+
+        optimizer.zero_grad()
+        logits = model(imgs)
+        loss = criterion(logits, labels)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        preds = logits.argmax(1)
+        correct += preds.eq(labels).sum().item()
+        total += labels.size(0)
+        if i % 10 == 0:
+            logger.info(
+                f"step {i:>4}/{len(loader)} | loss={loss.item():.4f}"
+            )
+
+    avg_loss = total_loss / len(loader)
+    avg_acc = correct / total
+
+    return avg_loss, avg_acc
+
+
+@torch.no_grad()
+def _val_epoch(model, loader, criterion, device):
+
+    model.eval()
+
+    total_loss = 0
+    correct = 0
+    total = 0
+
+    for imgs, labels in loader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+        logits = model(imgs)
+        loss = criterion(logits, labels)
+        total_loss += loss.item()
+        preds = logits.argmax(1)
+        correct += preds.eq(labels).sum().item()
+
+        total += labels.size(0)
+
+    avg_loss = total_loss / len(loader)
+    avg_acc = correct / total
+
+    return avg_loss, avg_acc
+
+
+def train(
+    raw_data_dir: str = "data/raw",
+    processed_data_dir: str = "data/processed",
+    model_save_dir: str = "models",
+    epochs: int = 20,
+    batch_size: int = 16,
+    learning_rate: float = 1e-4,
+    weight_decay: float = 1e-4,
+    patience: int = 5,
+):
+
+
+    mlflow.set_tracking_uri(
+        os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+    )
+
+    mlflow.set_experiment("AstroNova-Classification")
+    logger.info(f"Using device: {DEVICE}")
+
+    preprocessor = DataPreprocessor(
+        raw_data_dir,
+        processed_data_dir,
+    )
+    preprocessor.split_and_copy()
+
+    train_loader, val_loader, test_loader = (
+        preprocessor.get_dataloaders(batch_size)
+    )
+
+    model = AstroClassifier(num_classes=4).to(DEVICE)
+
+    logger.info(
+        f"Trainable parameters: {model.trainable_params:,}"
+    )
+
+    class_counts = [123, 85, 125, 65]
+
+    class_weights = torch.tensor(
+        [1.0 / c for c in class_counts],
+        dtype=torch.float,
+    ).to(DEVICE)
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=epochs,
+    )
+
+    Path(model_save_dir).mkdir(parents=True, exist_ok=True)
+
+    with mlflow.start_run(run_name="resnet50_run") as run:
+        
+        mlflow.log_params({
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "weight_decay": weight_decay,
+            "optimizer": "AdamW",
+            "scheduler": "CosineAnnealingLR",
+            "architecture": "resnet50",
+            "num_classes": 4,
+            "trainable_layers": "layer4 + fc",
+            "dropout": 0.5,
+            "patience": patience,
+            "train_images": len(train_loader.dataset),
+            "val_images": len(val_loader.dataset),
+        })
+
+        best_val_acc = 0.0
+        patience_counter = 0
+        history = []
+        
+        for epoch in range(1, epochs + 1):
+
+            logger.info(
+                f"\n────────── Epoch {epoch}/{epochs} ──────────"
+            )
+
+            train_loss, train_acc = _train_epoch(
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                DEVICE,
+            )
+
+            val_loss, val_acc = _val_epoch(
+                model,
+                val_loader,
+                criterion,
+                DEVICE,
+            )
+
+            scheduler.step()
+
+            logger.info(
+                f"train loss={train_loss:.4f} | "
+                f"train acc={train_acc:.4f}"
+            )
+
+            logger.info(
+                f"val   loss={val_loss:.4f} | "
+                f"val   acc={val_acc:.4f}"
+            )
+
+
+            mlflow.log_metrics({
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "learning_rate": scheduler.get_last_lr()[0],
+            }, step=epoch)
+
+            history.append({
+                "epoch": epoch,
+                "train_loss": round(train_loss, 4),
+                "train_acc": round(train_acc, 4),
+                "val_loss": round(val_loss, 4),
+                "val_acc": round(val_acc, 4),
+            })
+
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+
+                best_model_path = (
+                    f"{model_save_dir}/best_model.pt"
+                )
+
+                model.save(best_model_path)
+
+                logger.info(
+                    f"✓ New best model saved "
+                    f"(val_acc={val_acc:.4f})"
+                )
+
+                mlflow.pytorch.log_model(
+                    pytorch_model=model,
+                    artifact_path="model",
+                    registered_model_name="AstroNova-Classifier",
+                )
+
+                mlflow.log_metric(
+                    "best_val_acc",
+                    best_val_acc,
+                )
+
+            else:
+
+                patience_counter += 1
+
+                if patience_counter >= patience:
+
+                    logger.info(
+                        f"Early stopping triggered at epoch {epoch}"
+                    )
+
+                    break
+
+        epochs_ran = [x["epoch"] for x in history]
+
+        train_losses = [x["train_loss"] for x in history]
+        val_losses = [x["val_loss"] for x in history]
+
+        train_accs = [x["train_acc"] for x in history]
+        val_accs = [x["val_acc"] for x in history]
+
+
+        plt.figure(figsize=(8, 5))
+
+        plt.plot(epochs_ran, train_losses, label="Train Loss")
+        plt.plot(epochs_ran, val_losses, label="Validation Loss")
+
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+
+        plt.title("Training vs Validation Loss")
+
+        plt.legend()
+
+        loss_plot_path = "loss_curve.png"
+
+        plt.savefig(loss_plot_path)
+
+        plt.close()
+
+
+        plt.figure(figsize=(8, 5))
+
+        plt.plot(epochs_ran, train_accs, label="Train Accuracy")
+        plt.plot(epochs_ran, val_accs, label="Validation Accuracy")
+
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+
+        plt.title("Training vs Validation Accuracy")
+
+        plt.legend()
+
+        acc_plot_path = "accuracy_curve.png"
+
+        plt.savefig(acc_plot_path)
+
+        plt.close()
+
+        metrics_path = "metrics.json"
+
+        Path(metrics_path).write_text(
+            json.dumps(history, indent=2)
+        )
+
+ 
+        mlflow.log_artifact(loss_plot_path)
+        mlflow.log_artifact(acc_plot_path)
+        mlflow.log_artifact(metrics_path)
+
+ 
+        mlflow.log_metrics({
+            "final_best_val_acc": best_val_acc,
+            "total_epochs_run": epoch,
+        })
+
+        logger.info(f"\nRun ID: {run.info.run_id}")
+
+    logger.info(
+        f"\nTraining complete. "
+        f"Best validation accuracy: {best_val_acc:.4f}"
+    )
+
+    return best_val_acc
+
+
+if __name__ == "__main__":
+    train()
+
+

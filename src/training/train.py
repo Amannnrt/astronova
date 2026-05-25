@@ -101,13 +101,33 @@ def train(
     weight_decay: float = 1e-4,
     patience: int = 5,
 ):
+    # ------------------------------------------------------------------ #
+    # MLflow setup — use env vars injected by Airflow/Docker override     #
+    # ------------------------------------------------------------------ #
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+    artifact_root = os.getenv("MLFLOW_ARTIFACT_ROOT", "./mlruns")
 
+    mlflow.set_tracking_uri(tracking_uri)
 
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
-    )
+    # Create experiment with the correct artifact root if it doesn't exist.
+    # This prevents MLflow from reusing a stale path stored in the DB.
+    from mlflow.tracking import MlflowClient
+    client = MlflowClient()
+    experiment_name = "AstroNova-Classification"
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        mlflow.create_experiment(
+            experiment_name,
+            artifact_location=artifact_root,
+        )
+        logger.info(f"Created experiment '{experiment_name}' with artifact root: {artifact_root}")
+    else:
+        logger.info(f"Using existing experiment '{experiment_name}' (artifact location: {experiment.artifact_location})")
 
-    mlflow.set_experiment("AstroNova-Classification")
+    mlflow.set_experiment(experiment_name)
+
+    # ------------------------------------------------------------------ #
+
     logger.info(f"Using device: {DEVICE}")
 
     preprocessor = DataPreprocessor(
@@ -149,7 +169,7 @@ def train(
     Path(model_save_dir).mkdir(parents=True, exist_ok=True)
 
     with mlflow.start_run(run_name="resnet50_run") as run:
-        
+
         mlflow.log_params({
             "epochs": epochs,
             "batch_size": batch_size,
@@ -169,7 +189,7 @@ def train(
         best_val_acc = 0.0
         patience_counter = 0
         history = []
-        
+
         for epoch in range(1, epochs + 1):
 
             logger.info(
@@ -203,7 +223,6 @@ def train(
                 f"val   acc={val_acc:.4f}"
             )
 
-
             mlflow.log_metrics({
                 "train_loss": train_loss,
                 "train_acc": train_acc,
@@ -219,7 +238,6 @@ def train(
                 "val_loss": round(val_loss, 4),
                 "val_acc": round(val_acc, 4),
             })
-
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
@@ -267,7 +285,6 @@ def train(
         train_accs = [x["train_acc"] for x in history]
         val_accs = [x["val_acc"] for x in history]
 
-
         plt.figure(figsize=(8, 5))
 
         plt.plot(epochs_ran, train_losses, label="Train Loss")
@@ -285,7 +302,6 @@ def train(
         plt.savefig(loss_plot_path)
 
         plt.close()
-
 
         plt.figure(figsize=(8, 5))
 
@@ -311,12 +327,10 @@ def train(
             json.dumps(history, indent=2)
         )
 
- 
         mlflow.log_artifact(loss_plot_path)
         mlflow.log_artifact(acc_plot_path)
         mlflow.log_artifact(metrics_path)
 
- 
         mlflow.log_metrics({
             "final_best_val_acc": best_val_acc,
             "total_epochs_run": epoch,

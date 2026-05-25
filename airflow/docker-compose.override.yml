@@ -4,10 +4,13 @@ services:
       - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
     environment:
       - PYTHONPATH=/usr/local/astronova
+      - MLFLOW_TRACKING_URI=sqlite:////usr/local/astronova/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/usr/local/astronova/mlruns
 
   triggerer:
     volumes:
       - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
     environment:
       - PYTHONPATH=/usr/local/astronova
-
+      - MLFLOW_TRACKING_URI=sqlite:////usr/local/astronova/mlflow.db
+      - MLFLOW_ARTIFACT_ROOT=/usr/local/astronova/mlruns
