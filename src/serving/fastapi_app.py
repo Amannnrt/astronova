@@ -8,6 +8,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional
+import os
 
 import torch
 import torch.nn.functional as F
@@ -18,6 +19,11 @@ from torchvision import transforms
 
 from src.models.resnet_classifier import AstroClassifier
 
+from src.monitoring.drift_detector import DriftDetector
+drift_detector = DriftDetector(
+    window_size=100,
+    threshold=float(os.getenv("CONFIDENCE_THRESHOLD", "0.75")),
+)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -113,10 +119,10 @@ async def predict(file: UploadFile = File(...)):
     confidence           = float(confidence)
     pred_class           = CLASS_NAMES[pred_idx.item()]
 
-    # Track for drift detection (Stage 7)
     prediction_count += 1
-    confidence_window.append(confidence)
-
+    drift_detector.log_confidence(confidence, pred_class)
+    drift_detector.check_and_trigger()
+    
     return {
         "class":            pred_class,
         "confidence":       round(confidence, 4),
@@ -131,16 +137,12 @@ async def predict(file: UploadFile = File(...)):
 
 @app.get("/metrics")
 def metrics():
-    avg_conf = (
-        sum(confidence_window) / len(confidence_window)
-        if confidence_window else 0.0
-    )
+    status = drift_detector.get_status()
     return {
         "total_predictions":  prediction_count,
-        "avg_confidence":     round(avg_conf, 4),
-        "drift_flag":         avg_conf < 0.75 and len(confidence_window) >= 10,
-        "window_size":        len(confidence_window),
-    }
+        **status,
+
+        }
 
 
 @app.get("/model-info")
