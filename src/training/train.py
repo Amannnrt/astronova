@@ -101,9 +101,6 @@ def train(
     weight_decay: float = 1e-4,
     patience: int = 5,
 ):
-    # ------------------------------------------------------------------ #
-    # MLflow setup — use env vars injected by Airflow/Docker override     #
-    # ------------------------------------------------------------------ #
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
     artifact_root = os.getenv("MLFLOW_ARTIFACT_ROOT", "./mlruns")
 
@@ -118,7 +115,7 @@ def train(
     if experiment is None:
         mlflow.create_experiment(
             experiment_name,
-            artifact_location=artifact_root,
+            artifact_location=artifact_root,   
         )
         logger.info(f"Created experiment '{experiment_name}' with artifact root: {artifact_root}")
     else:
