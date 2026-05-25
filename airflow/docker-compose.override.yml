@@ -1,0 +1,13 @@
+services:
+  scheduler:
+    volumes:
+      - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
+    environment:
+      - PYTHONPATH=/usr/local/astronova
+
+  triggerer:
+    volumes:
+      - /home/amannrt/Desktop/projects/Astronova:/usr/local/astronova
+    environment:
+      - PYTHONPATH=/usr/local/astronova
+
