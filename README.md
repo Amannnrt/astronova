@@ -1,5 +1,3 @@
-# AstroNova — End-to-End ML Engineering Pipeline
-
 A production-grade, self-updating machine learning system that automatically fetches NASA astronomy images, classifies them using a fine-tuned ResNet50 model, monitors model confidence for data drift, and triggers automated retraining and redeployment — with zero manual intervention.
 
 ---
