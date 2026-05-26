@@ -87,6 +87,14 @@ NASA APIs (APOD + Image Library)
 
 ---
 
+## Demo
+
+### Gradio Classification UI
+
+![Gradio Demo](screenshots/gradio.png)
+
+---
+
 ## Model
 
 | Detail | Value |
@@ -290,6 +298,42 @@ curl -X POST http://localhost:8000/predict \
   "prediction_number": 42
 }
 ```
+
+---
+
+## MLflow Experiment Tracking
+
+Every training run logs parameters, metrics per epoch, and the model artifact to MLflow.
+
+![MLflow Run Overview](screenshots/mlflow1.png)
+
+![MLflow Training Curves](screenshots/mlflow2.png)
+
+---
+
+## Training Results
+
+### Accuracy and Loss Curves
+
+![Accuracy Curve](screenshots/accuracy_curve.png)
+
+![Loss Curve](screenshots/loss_curve.png)
+
+### Confusion Matrix
+
+![Confusion Matrix](screenshots/confusion_matrix.png)
+
+### Confidence Distribution
+
+![Confidence Distribution](screenshots/confidence_distribution.png)
+
+---
+
+## Airflow Orchestration
+
+Both DAGs running and scheduled — daily APOD fetch and monthly retraining pipeline.
+
+![Airflow DAGs](screenshots/airflow.png)
 
 ---
 
